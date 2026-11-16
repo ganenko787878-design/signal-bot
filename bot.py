@@ -41,6 +41,21 @@ DEFAULT_CONFIG = {
 OPEN_BOT = os.environ.get("OPEN_BOT", "").strip().lower() in ("1", "yes", "true", "да")
 ADMINS = {int(x) for x in os.environ.get("ALLOWED_CHATS", "").replace(";", ",").split(",") if x.strip().lstrip("-").isdigit()}
 RISK_WORD = {"moderate": "умеренный", "high": "высокий"}
+TAKER_FEE = 0.00055   # комиссия тейкера Bybit за одну сторону, для расчёта итога реальной сделки
+FILL_HINT = "Пришлите цену входа и объём в монетах через пробел, например: 64350 0.05"
+
+
+def parse_fill(text):
+    """«64350 0.05», «64 350,5 0,05» → (цена, объём) или None."""
+    parts = text.replace(",", ".").split()
+    if len(parts) < 2:
+        return None
+    try:
+        qty = float(parts[-1])
+        price = float("".join(parts[:-1]))
+    except ValueError:
+        return None
+    return (price, qty) if price > 0 and qty > 0 else None
 CLOSE_WORDS = {
     "stop": "Стоп", "be": "Стоп в безубытке", "trail": "Трейлинг-стоп", "tp2": "Тейк 2",
     "flip": "Тренд развернулся", "time": "Выход по времени",
@@ -193,6 +208,7 @@ class Bot:
             "chats": [], "pair_code": f"{random.randint(0, 999999):06d}", "tg_offset": 0, "last_bar": {},
             "open": [], "closed": [], "seq": 0, "deposit": cfg.get("deposit_usdt", 1000),
             "risk_pct": {}, "on": dict(cfg.get("profiles_on", {})),
+            "await_fill": {}, "fill_prompts": {},
         }
         if state_path and os.path.exists(state_path):
             with open(state_path, encoding="utf-8") as f:
@@ -201,6 +217,8 @@ class Bot:
             x = x.strip()
             if x.lstrip("-").isdigit() and int(x) not in self.state["chats"]:
                 self.state["chats"].append(int(x))   # чаты из настроек хостинга подключаются без /start
+        self.state.setdefault("await_fill", {})
+        self.state.setdefault("fill_prompts", {})
         self.pos = {r["id"]: st.Position.from_dict(r["pos"]) for r in self.state["open"]}
         self._inst = {}
         self.auto_take = False   # в режиме --replay все сделки считаются взятыми, чтобы показать сопровождение
@@ -363,6 +381,59 @@ class Bot:
         lev = max(1, min(50, int(1 / (1.5 * stop_frac + 0.005))))
         return risk_usd, qty, qty * pos.entry, lev, inst
 
+    def fill_usd(self, rec, pos, fills=None):
+        """Итог реальной сделки в USDT по закрытым частям (с комиссией тейкера)."""
+        fl = rec.get("fill")
+        if not fl:
+            return None
+        E, q, s = fl["price"], fl["qty"], pos.side
+        out = 0.0
+        for _, px, frac, _ in (fills if fills is not None else pos.fills):
+            out += frac * q * (s * (px - E) - (E + px) * TAKER_FEE)
+        return out
+
+    def fill_at(self, rec, pos, px):
+        """Сколько USDT будет у реальной сделки, если остаток закроется по цене px."""
+        fl = rec.get("fill")
+        if not fl:
+            return None
+        E, q, s = fl["price"], fl["qty"], pos.side
+        return self.fill_usd(rec, pos) + pos.frac * q * (s * (px - E) - (E + px) * TAKER_FEE)
+
+    def fill_line(self, rec, usd, what):
+        fl = rec.get("fill")
+        if not fl or usd is None:
+            return ""
+        dep = self.state["deposit"]
+        return (f"\nВаша сделка (вход {self.fp(rec['sym'], fl['price'])}, {fnum(fl['qty'], self.inst(rec['sym'])['qty_dp'])} {self.inst(rec['sym'])['base']}): "
+                f"{what} <b>{'+' if usd >= 0 else '−'}{fnum(abs(usd), 2)} USDT</b> ({fpct(usd / dep * 100)} депозита)")
+
+    def set_fill(self, rec, price, qty):
+        """Запоминает реальный вход и возвращает подтверждение."""
+        pos, sym = self.pos[rec["id"]], rec["sym"]
+        inst = self.inst(sym)
+        rec["fill"] = {"price": price, "qty": qty}
+        rec["taken"], rec["muted"] = True, False
+        f = lambda x: self.fp(sym, x)  # noqa: E731
+        L = [f"Записал: <b>{sym} {'лонг' if pos.side > 0 else 'шорт'}</b>, вход {f(price)}, объём {fnum(qty, inst['qty_dp'])} {inst['base']} "
+             f"(≈ {fnum(price * qty, 0)} USDT)."]
+        diff = (price / pos.entry - 1) * 100
+        if abs(diff) >= 0.05:
+            better = (price - pos.entry) * pos.side < 0
+            L.append(f"Это на {fnum(abs(diff), 2)}% {'лучше' if better else 'хуже'} цены сигнала ({f(pos.entry)}). Стоп и тейки остаются на уровнях из сигнала.")
+        if (pos.stop - price) * pos.side >= 0:
+            L.append(f"⚠️ Ваша цена уже за стопом ({f(pos.stop)}). Проверьте, правильно ли введена цена.")
+        else:
+            loss = self.fill_at(rec, pos, pos.stop)
+            L.append(f"Если сработает стоп {f(pos.stop)}: <b>{'+' if loss >= 0 else '−'}{fnum(abs(loss), 2)} USDT</b> ({fpct(loss / self.state['deposit'] * 100)} депозита).")
+            for lvl, name in ((pos.tp1, "тейк 1"), (pos.tp2, "тейк 2")):
+                if lvl and not (name == "тейк 1" and pos.tp1_done):
+                    L.append(f"Если дойдёт до {name} {f(lvl)}: цена {fpct((lvl / price - 1) * 100 * pos.side)} от вашего входа.")
+        if abs(diff) > 15:
+            L.append("⚠️ Цена сильно отличается от сигнала. Если ошиблись, пришлите заново: ответом на это сообщение или командой /fill.")
+        L.append("Дальше бот будет писать итог и в долларах. Исправить: /fill 64350 0.05")
+        return "\n".join(L)
+
     def exposure(self):
         """Сколько позиций в каждую сторону и какой убыток, если сработают все стопы, % депозита."""
         longs = shorts = 0
@@ -446,23 +517,36 @@ class Bot:
                     rec["stop_note"] = px
                     locked = pos.pnl_pct(px)
                     text = f"{head}\nСтоп подтянуть до {f(px)}: {'фиксирует прибыль' if locked > 0 else 'убыток не больше'} {fpct(abs(locked)).lstrip('+')} от входа."
+                    text += self.fill_line(rec, self.fill_at(rec, pos, px), "если сработает новый стоп,")
             elif kind == "milestone":
                 text = f"{head}\nПрибыль {fpct(pos.pnl_pct(px))} от входа, это +{rec['milestone']}R. По правилам профиля держим, стоп сейчас {f(pos.stop)}."
+                text += self.fill_line(rec, self.fill_at(rec, pos, px), "сейчас на бумаге")
             elif kind == "tp1":
                 be = f", стоп перенести в безубыток ({f(pos.entry)})" if prof["ex"].get("be") else ""
                 text = f"✅ {head}\nТейк 1 на {f(px)}: прибыль {fpct(pos.pnl_pct(px))} от входа.\nПо правилам: закрыть {prof['ex']['tp1_frac'] * 100:.0f}% позиции{be}."
+                text += self.fill_line(rec, self.fill_usd(rec, pos, [x for x in pos.fills if x[3] == "tp1"]), "за закрытую часть")
                 rec["stop_note"] = pos.stop
             if pos.closed and kind in CLOSE_WORDS:
                 net = pos.r - st.costs_r(pos, COST)
                 act = "закрыть остаток" if pos.tp1_done else "закрыть позицию"
-                text = (f"{'✅' if net > 0 else '⛔'} {head}\n{CLOSE_WORDS[kind]} на {f(px)}: {fpct(pos.pnl_pct(px))} от входа. По правилам: {act}.\n"
-                        f"Итог сделки с комиссиями: {fr(net)}, это {fpct(net * self.risk_pct(key))} депозита.")
+                usd = self.fill_usd(rec, pos)
+                if usd is not None:
+                    text = (f"{'✅' if usd > 0 else '⛔'} {head}\n{CLOSE_WORDS[kind]} на {f(px)}. По правилам: {act}."
+                            + self.fill_line(rec, usd, "итог с комиссиями")
+                            + f"\nПо цене сигнала было бы {fr(net)}.")
+                else:
+                    text = (f"{'✅' if net > 0 else '⛔'} {head}\n{CLOSE_WORDS[kind]} на {f(px)}: {fpct(pos.pnl_pct(px))} от входа. По правилам: {act}.\n"
+                            f"Итог сделки с комиссиями: {fr(net)}, это {fpct(net * self.risk_pct(key))} депозита.")
                 brief = (f"Тест без вашего входа: {sym} {side} ({prof['code']}) закрыт. {CLOSE_WORDS[kind]} на {f(px)}, {fpct(pos.pnl_pct(px))} от входа"
                          f"{', до этого был тейк 1' if pos.tp1_done and kind != 'tp2' else ''}. Итог {fr(net)}.")
                 self.state["closed"].append({
                     "id": rec["id"], "profile": key, "sym": sym, "side": pos.side, "t0": pos.t_entry, "t1": now,
                     "entry": pos.entry, "exit": px, "r": net, "reason": kind, "taken": rec.get("taken"),
+                    "fill": rec.get("fill"), "usd": usd if rec.get("fill") else None,
                 })
+                for ch, rid in list(self.state["await_fill"].items()):
+                    if rid == rec["id"]:
+                        self.state["await_fill"].pop(ch, None)
                 self.state["open"] = [r for r in self.state["open"] if r["id"] != rec["id"]]
                 self.pos.pop(rec["id"], None)
             if rec.get("muted"):
@@ -487,7 +571,8 @@ class Bot:
             tag = " · вы в сделке" if rec.get("taken") else (" · пропущена" if rec.get("muted") else " · только тест")
             L.append(f"\n{'🟢' if pos.side > 0 else '🔴'} <b>{sym}</b> {self.profiles[rec['profile']]['code']}{tag}\n"
                      f"вход {self.fp(sym, pos.entry)} ({ftime(pos.t_entry)}), сейчас {self.fp(sym, px)}: {fpct(pos.pnl_pct(px))}\n"
-                     f"стоп {self.fp(sym, pos.stop)}, дальше {nxt}, в позиции {pos.frac * 100:.0f}%")
+                     f"стоп {self.fp(sym, pos.stop)}, дальше {nxt}, в позиции {pos.frac * 100:.0f}%"
+                     + self.fill_line(rec, self.fill_at(rec, pos, px), "сейчас"))
         return "\n".join(L)
 
     def stats_text(self):
@@ -503,6 +588,10 @@ class Bot:
             rs = [t["r"] for t in tr]
             L.append(f"\n<b>{self.profiles[k]['title']}</b>\n{deals(len(tr))}, прибыльных {sum(1 for r in rs if r > 0) / len(rs) * 100:.0f}%, "
                      f"в среднем {fr(sum(rs) / len(rs))}, итог {fr(sum(rs))} = {fpct(sum(rs) * self.risk_pct(k))} депозита")
+        real = [t for t in closed if t.get("usd") is not None]
+        if real:
+            tot = sum(t["usd"] for t in real)
+            L.append(f"\n<b>Ваши реальные сделки</b>\n{deals(len(real))}, итог {'+' if tot >= 0 else '−'}{fnum(abs(tot), 2)} USDT")
         first = min(t["t0"] for t in closed)
         L.append(f"\nС {ftime(first)}. Открыто сейчас: {len(self.state['open'])}.")
         return "\n".join(L)
@@ -554,8 +643,9 @@ class Bot:
             "/rules — правила всех профилей, включение и выключение\n"
             "/market — тренды, фандинг и перекос по инструментам\n"
             "/deposit 5000 — депозит для расчёта объёма\n"
-            "/risk id_mod 0.3 — риск на сделку в % для профиля (id_mod, id_high, sw_mod, sw_high)\n\n"
-            "Под каждым сигналом кнопки. «Вошёл»: бот ведёт сделку и пишет про тейки, перенос стопа и выход. «Пропустил»: бот считает сделку для статистики молча. Без нажатия пришлёт только итог.\n\n"
+            "/risk id_mod 0.3 — риск на сделку в % для профиля (id_mod, id_high, sw_mod, sw_high)\n"
+            "/fill 64350 0.05 — указать или исправить цену входа и объём вашей сделки\n\n"
+            "Под каждым сигналом кнопки. «Вошёл»: бот спросит цену и объём вашего входа, ведёт сделку и пишет про тейки, перенос стопа и выход с итогом в долларах. «Пропустил»: бот считает сделку для статистики молча. Без нажатия пришлёт только итог.\n\n"
             "Бот не подключается к аккаунту биржи и сам сделки не открывает.")
 
     # --- Telegram
@@ -578,7 +668,25 @@ class Bot:
                             r["taken"], r["muted"] = True, False
                         elif not r.get("taken"):
                             r["taken"], r["muted"] = False, True
-                    note = "Отметил: вы в сделке. Буду вести её до выхода."
+                    note = "Отметил: вы в сделке. Пришлите цену входа и объём."
+                    rec = next(r for r in group if r["id"] in ids)
+                    pos, inst = self.pos[rec["id"]], self.inst(rec["sym"])
+                    risk_usd, qty, _, _, _ = self.sizing(rec["profile"], rec["sym"], pos)
+                    example = f"{self.fp(rec['sym'], pos.entry).replace(' ', '').replace(',', '.')} {fnum(qty if qty >= inst['min_qty'] else inst['min_qty'], inst['qty_dp']).replace(' ', '').replace(',', '.')}"
+                    mid2 = None
+                    try:
+                        mid2 = tg.call("sendMessage", {
+                            "chat_id": chat, "parse_mode": "HTML",
+                            "text": (f"По какой цене и каким объёмом вы вошли в <b>{rec['sym']} {'лонг' if pos.side > 0 else 'шорт'}</b>?\n"
+                                     f"Ответьте на это сообщение: цена и объём в {inst['base']} через пробел, например <code>{example}</code>\n"
+                                     "Тогда бот будет считать итог по вашей настоящей сделке в долларах. Можно пропустить: бот будет считать по цене сигнала."),
+                            "reply_markup": {"force_reply": True, "input_field_placeholder": example},
+                        })["message_id"]
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self.state["await_fill"][str(chat)] = rec["id"]
+                    if mid2:
+                        self.state["fill_prompts"][f"{chat}:{mid2}"] = rec["id"]
                 elif hit:
                     for r in hit:
                         r["taken"], r["muted"] = False, True
@@ -608,6 +716,29 @@ class Bot:
                 tg.send(chat, "Бот приватный. Пришлите /start и код из окна, где запущен бот. Например: /start 123456")
             return
         reply = None
+        if cmd == "/fill" or not text.startswith("/"):
+            body = " ".join(args) if cmd == "/fill" else text
+            target = None
+            rto = (msg.get("reply_to_message") or {}).get("message_id")
+            if rto:
+                rid = self.state["fill_prompts"].get(f"{chat}:{rto}")
+                target = next((r for r in self.state["open"] if r["id"] == rid or str(rto) in [str(v) for v in r.get("msgs", {}).values()] and r.get("taken")), None)
+            if target is None:
+                rid = self.state["await_fill"].get(str(chat))
+                target = next((r for r in self.state["open"] if r["id"] == rid), None)
+            if target is None:
+                taken = [r for r in self.state["open"] if r.get("taken")]
+                target = taken[0] if len(taken) == 1 else None
+            fill = parse_fill(body)
+            if target is None:
+                tg.send(chat, "Не понял, к какой сделке это относится. Нажмите «Вошёл» под сигналом и ответьте на вопрос бота ценой и объёмом.")
+            elif fill is None:
+                tg.send(chat, FILL_HINT)
+            else:
+                tg.send(chat, self.set_fill(target, *fill))
+                self.state["await_fill"].pop(str(chat), None)
+            self.save()
+            return
         if ADMINS and chat not in ADMINS and (cmd in ("/deposit", "/risk") or re.match(r"/(on|off)", cmd)):
             tg.send(chat, "Менять настройки бота может только владелец.")
             return
