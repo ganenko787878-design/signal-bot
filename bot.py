@@ -27,7 +27,9 @@ from engine import COST
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
-STATE_PATH = os.path.join(HERE, "state.json")
+STATE_DIR = os.environ.get("DATA_DIR", "").strip() or HERE   # на Bothost это постоянная папка, она не стирается при перезапуске
+os.makedirs(STATE_DIR, exist_ok=True)
+STATE_PATH = os.path.join(STATE_DIR, "state.json")
 RESULTS_PATH = os.path.join(HERE, "results.json")
 
 DEFAULT_CONFIG = {
