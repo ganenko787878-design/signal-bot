@@ -1,0 +1,120 @@
+{
+ "id_mod": {
+  "title": "Внутри дня · умеренный риск",
+  "code": "ВД-У",
+  "horizon": "intraday",
+  "risk": "moderate",
+  "tf": "60",
+  "htf": "240",
+  "family": "breakout",
+  "p": {
+   "htf_fast": 50,
+   "htf_slow": 200,
+   "adx_min": 0,
+   "n": 48,
+   "vol": 0,
+   "stop_atr": 2.5,
+   "htf_filter": 2
+  },
+  "ex": {
+   "tp1_r": null,
+   "tp1_frac": 0.0,
+   "be": false,
+   "tp2_r": null,
+   "trail_atr": 3.0,
+   "trail_start": true,
+   "max_bars": 24,
+   "flip": false
+  },
+  "max_open": 3,
+  "risk_pct": 0.2
+ },
+ "id_high": {
+  "title": "Внутри дня · высокий риск",
+  "code": "ВД-В",
+  "horizon": "intraday",
+  "risk": "high",
+  "tf": "60",
+  "htf": "240",
+  "family": "breakout",
+  "p": {
+   "htf_fast": 50,
+   "htf_slow": 200,
+   "adx_min": 0,
+   "n": 48,
+   "vol": 0,
+   "stop_atr": 1.5,
+   "htf_filter": 2
+  },
+  "ex": {
+   "tp1_r": null,
+   "tp1_frac": 0.0,
+   "be": false,
+   "tp2_r": null,
+   "trail_atr": 3.0,
+   "trail_start": true,
+   "max_bars": 24,
+   "flip": false
+  },
+  "max_open": 3,
+  "risk_pct": 0.45
+ },
+ "sw_mod": {
+  "title": "Среднесрок · умеренный риск",
+  "code": "СС-У",
+  "horizon": "swing",
+  "risk": "moderate",
+  "tf": "240",
+  "htf": "D",
+  "family": "breakout",
+  "p": {
+   "htf_fast": 50,
+   "htf_slow": 200,
+   "adx_min": 0,
+   "n": 55,
+   "vol": 1.5,
+   "stop_atr": 1.5,
+   "htf_filter": 2
+  },
+  "ex": {
+   "tp1_r": 1.0,
+   "tp1_frac": 0.5,
+   "be": true,
+   "tp2_r": 3.0,
+   "trail_atr": null,
+   "max_bars": null,
+   "flip": false
+  },
+  "max_open": 3,
+  "risk_pct": 0.45
+ },
+ "sw_high": {
+  "title": "Среднесрок · высокий риск",
+  "code": "СС-В",
+  "horizon": "swing",
+  "risk": "high",
+  "tf": "240",
+  "htf": "D",
+  "family": "breakout",
+  "p": {
+   "htf_fast": 50,
+   "htf_slow": 200,
+   "adx_min": 0,
+   "n": 30,
+   "vol": 1.5,
+   "stop_atr": 1.5,
+   "htf_filter": 0
+  },
+  "ex": {
+   "tp1_r": 1.0,
+   "tp1_frac": 0.5,
+   "be": true,
+   "tp2_r": 3.0,
+   "trail_atr": null,
+   "max_bars": null,
+   "flip": false
+  },
+  "max_open": 4,
+  "risk_pct": 0.4
+ }
+}
