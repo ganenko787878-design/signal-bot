@@ -36,6 +36,8 @@ DEFAULT_CONFIG = {
     "deposit_usdt": 1000,
     "profiles_on": {"id_mod": True, "id_high": True, "sw_mod": True, "sw_high": True},
 }
+OPEN_BOT = os.environ.get("OPEN_BOT", "").strip().lower() in ("1", "yes", "true", "да")
+ADMINS = {int(x) for x in os.environ.get("ALLOWED_CHATS", "").replace(";", ",").split(",") if x.strip().lstrip("-").isdigit()}
 RISK_WORD = {"moderate": "умеренный", "high": "высокий"}
 CLOSE_WORDS = {
     "stop": "Стоп", "be": "Стоп в безубытке", "trail": "Трейлинг-стоп", "tp2": "Тейк 2",
@@ -592,7 +594,11 @@ class Bot:
         cmd, *args = text.split()
         cmd = cmd.split("@")[0].lower()
         if chat not in self.state["chats"]:
-            if cmd == "/start" and args and args[0] == self.state["pair_code"]:
+            if cmd == "/start" and OPEN_BOT:
+                self.state["chats"].append(chat)
+                self.save()
+                tg.send(chat, "Готово, этот чат подключён. Сигналы будут приходить сюда.\n\n" + self.HELP)
+            elif cmd == "/start" and args and args[0] == self.state["pair_code"]:
                 self.state["chats"].append(chat)
                 self.save()
                 tg.send(chat, "Готово, этот чат подключён. Сигналы будут приходить сюда.\n\n" + self.HELP)
@@ -600,6 +606,9 @@ class Bot:
                 tg.send(chat, "Бот приватный. Пришлите /start и код из окна, где запущен бот. Например: /start 123456")
             return
         reply = None
+        if ADMINS and chat not in ADMINS and (cmd in ("/deposit", "/risk") or re.match(r"/(on|off)", cmd)):
+            tg.send(chat, "Менять настройки бота может только владелец.")
+            return
         if cmd in ("/start", "/help"):
             reply = self.HELP
         elif cmd == "/status":
