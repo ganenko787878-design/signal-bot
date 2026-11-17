@@ -34,9 +34,9 @@ RESULTS_PATH = os.path.join(HERE, "results.json")
 
 DEFAULT_CONFIG = {
     "telegram_token": "",
-    "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "BNBUSDT"],
+    "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "HYPEUSDT", "ZECUSDT", "NEARUSDT", "LITUSDT", "RAREUSDT", "AKEUSDT", "DOGEUSDT", "1000PEPEUSDT", "ENAUSDT", "AAVEUSDT", "SUIUSDT", "XMRUSDT", "ADAUSDT", "INJUSDT", "UNIUSDT", "ASTERUSDT", "HUMAUSDT", "AVAXUSDT", "WLDUSDT", "LINKUSDT", "ICPUSDT", "INITUSDT", "PUMPFUNUSDT", "ZROUSDT", "TAOUSDT", "VVVUSDT", "XLMUSDT", "SOPHUSDT", "SKRUSDT", "ONDOUSDT", "LTCUSDT", "BNBUSDT", "PIEVERSEUSDT", "FARTCOINUSDT", "TRUMPUSDT", "AEROUSDT"],
     "deposit_usdt": 1000,
-    "profiles_on": {"id_mod": True, "id_high": True, "sw_mod": True, "sw_high": True},
+    "profiles_on": {},
 }
 OPEN_BOT = os.environ.get("OPEN_BOT", "").strip().lower() in ("1", "yes", "true", "да")
 ADMINS = {int(x) for x in os.environ.get("ALLOWED_CHATS", "").replace(";", ",").split(",") if x.strip().lstrip("-").isdigit()}
@@ -217,6 +217,9 @@ class Bot:
             x = x.strip()
             if x.lstrip("-").isdigit() and int(x) not in self.state["chats"]:
                 self.state["chats"].append(int(x))   # чаты из настроек хостинга подключаются без /start
+        if "vc" in self.profiles and "vc" not in self.state["on"]:
+            # стратегия отца включается, старые профили выключаются (их можно вернуть командой /on_...)
+            self.state["on"] = {k: bool(p.get("default_on", True)) for k, p in self.profiles.items()}
         self.state.setdefault("await_fill", {})
         self.state.setdefault("fill_prompts", {})
         self.pos = {r["id"]: st.Position.from_dict(r["pos"]) for r in self.state["open"]}
@@ -243,7 +246,7 @@ class Bot:
         return self._inst[sym]
 
     def is_on(self, key):
-        return self.state["on"].get(key, True)
+        return self.state["on"].get(key, self.profiles[key].get("default_on", True))
 
     def risk_pct(self, key):
         return self.state["risk_pct"].get(key, self.profiles[key].get("risk_pct", 0.5))
@@ -620,7 +623,7 @@ class Bot:
 
     def market_text(self):
         L = ["<b>Рынок сейчас</b>"]
-        for sym in self.cfg["symbols"]:
+        for sym in self.cfg["symbols"][:6]:   # 6 крупнейших, чтобы команда отвечала быстро
             try:
                 ctx = self.data.context(sym)
                 marks = []
@@ -633,7 +636,7 @@ class Bot:
                          f"тренд: {', '.join(marks)}; фандинг {fpct(ctx.get('funding', 0) * 100, 4)}; в лонге {fnum(ctx.get('long_share', 0), 0)}% аккаунтов")
             except Exception as e:  # noqa: BLE001
                 L.append(f"\n{sym}: нет данных ({e})")
-        L.append("\nТренд: ↑ цена > EMA50 > EMA200, ↓ наоборот, → смешанно.")
+        L.append(f"\nПоказаны 6 крупнейших из {len(self.cfg['symbols'])} монет, за которыми следит бот.\nТренд: ↑ цена > EMA50 > EMA200, ↓ наоборот, → смешанно.")
         return "\n".join(L)
 
     HELP = ("<b>Команды</b>\n"
@@ -643,7 +646,7 @@ class Bot:
             "/rules — правила всех профилей, включение и выключение\n"
             "/market — тренды, фандинг и перекос по инструментам\n"
             "/deposit 5000 — депозит для расчёта объёма\n"
-            "/risk id_mod 0.3 — риск на сделку в % для профиля (id_mod, id_high, sw_mod, sw_high)\n"
+            "/risk vc 1 — риск на сделку в % для профиля (vc, id_mod, id_high, sw_mod, sw_high)\n"
             "/fill 64350 0.05 — указать или исправить цену входа и объём вашей сделки\n\n"
             "Под каждым сигналом кнопки. «Вошёл»: бот спросит цену и объём вашего входа, ведёт сделку и пишет про тейки, перенос стопа и выход с итогом в долларах. «Пропустил»: бот считает сделку для статистики молча. Без нажатия пришлёт только итог.\n\n"
             "Бот не подключается к аккаунту биржи и сам сделки не открывает.")

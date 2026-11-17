@@ -48,7 +48,7 @@ DEFAULT_PROFILES = {
         "risk_pct": 2.0, "max_open": 3,
     },
 }
-ORDER = ["id_mod", "id_high", "sw_mod", "sw_high"]
+ORDER = ["vc", "id_mod", "id_high", "sw_mod", "sw_high"]
 
 
 def load_profiles():
@@ -127,6 +127,9 @@ def prepare(profile, ltf, htf):
             rsi_min=ind.rolling_min(r, p["dip_look"]), rsi_max=ind.rolling_max(r, p["dip_look"]),
             sw_lo=ind.rolling_min(ltf.l, p["swing"]), sw_hi=ind.rolling_max(ltf.h, p["swing"]),
         )
+    elif profile["family"] == "volcandle":
+        P.update(vsma=ind.shift(ind.sma(ltf.v, p.get("vlen", 20))),
+                 ema=ind.ema(ltf.c, p.get("ema", 20)))
     else:
         P.update(
             hh=ind.shift(ind.rolling_max(ltf.h, p["n"])), ll=ind.shift(ind.rolling_min(ltf.l, p["n"])),
@@ -155,6 +158,8 @@ def signal_at(profile, P, i):
                 return None
             return -1, max(stop, c + p["min_stop"] * a)
         return None
+    if profile["family"] == "volcandle":
+        return _volcandle(profile, P, i, a, tr)
     # breakout
     if not s.v[i] > p["vol"] * P["vsma"][i]:
         return None
@@ -163,6 +168,49 @@ def signal_at(profile, P, i):
         return 1, c - p["stop_atr"] * a
     if c < P["ll"][i] and (f == 0 or (f == 1 and tr <= 0) or (f == 2 and tr == -1)):
         return -1, c + p["stop_atr"] * a
+    return None
+
+
+def _volcandle(profile, P, i, a, tr):
+    """Свеча с объёмом.
+    body: сильная свеча по направлению (тело ≥ body от диапазона, закрытие у края).
+    wick: свеча-отказ (длинная тень против направления, закрытие в нужной половине).
+    Объём свечи ≥ vol × средний за vlen свечей до неё."""
+    p, s = profile["p"], P["ltf"]
+    o, h, l, c, v = s.o[i], s.h[i], s.l[i], s.c[i], s.v[i]
+    rng = h - l
+    if not (rng > 0 and v > p["vol"] * P["vsma"][i]):
+        return None
+    if rng < p.get("min_rng", 0) * a:
+        return None
+    f, sides = p.get("htf_filter", 0), p.get("sides", "both")
+    body = abs(c - o) / rng
+    out = []
+    if p["pattern"] == "body":
+        if c < o and body >= p["body"] and (c - l) / rng <= p["close_edge"]:
+            out.append(-1)
+        if c > o and body >= p["body"] and (h - c) / rng <= p["close_edge"]:
+            out.append(1)
+    else:   # wick: отказ от уровня
+        up_w, dn_w = h - max(o, c), min(o, c) - l
+        if up_w / rng >= p["wick"] and (c - l) / rng <= 0.5:
+            out.append(-1)
+        if dn_w / rng >= p["wick"] and (h - c) / rng <= 0.5:
+            out.append(1)
+    for side in out:
+        if sides == "short" and side > 0:
+            continue
+        if f == 2 and tr != side:
+            continue
+        if f == 1 and tr == -side:
+            continue
+        if f == 3 and tr != -side:     # против тренда (вход на развороте)
+            continue
+        stop = (h + p["stop_buf"] * a) if side < 0 else (l - p["stop_buf"] * a)
+        dist = abs(c - stop)
+        if dist > p.get("max_stop", 99) * a or dist < p.get("min_stop", 0) * a:
+            return None
+        return side, stop
     return None
 
 
@@ -178,6 +226,15 @@ def explain(profile, P, i, side, fmt):
         out.append(f"Тренд {htf} {'вверх' if tr > 0 else 'вниз'}: цена {fmt(P['htf'].c[j])} {sign} EMA{p['htf_fast']} {fmt(P['hf'][j])} {sign} EMA{p['htf_slow']} {fmt(P['hs'][j])}")
     elif j >= 0:
         out.append(f"Тренд {htf} смешанный, сигнал без фильтра тренда")
+    if profile["family"] == "volcandle":
+        o, h, l, c, v = s.o[i], s.h[i], s.l[i], s.c[i], s.v[i]
+        kind = "сильная медвежья свеча" if side < 0 else "сильная бычья свеча"
+        if p["pattern"] == "wick":
+            kind = "свеча-отказ с длинной верхней тенью" if side < 0 else "свеча-отказ с длинной нижней тенью"
+        out.append(f"{tf}: {kind} (откр. {fmt(o)}, макс. {fmt(h)}, мин. {fmt(l)}, закр. {fmt(c)})")
+        if P["vsma"][i] > 0:
+            out.append("Объём свечи: " + f"{v / P['vsma'][i]:.1f}".replace(".", ",") + " от среднего")
+        return out
     if profile["family"] == "pullback":
         ext = P["rsi_min"][i] if side > 0 else P["rsi_max"][i]
         out.append(f"Откат закончился: RSI {tf} {'опускался до' if side > 0 else 'поднимался до'} {ext:.0f}, сейчас {P['rsi'][i]:.0f}")
@@ -297,7 +354,17 @@ def describe(profile):
     p, ex = profile["p"], profile["ex"]
     tf, htf = TF_NAME[profile["tf"]], TF_NAME[profile["htf"]]
     out = []
-    if profile["family"] == "breakout":
+    if profile["family"] == "volcandle":
+        what = ("сильная свеча по направлению: тело не меньше " + f"{p['body'] * 100:.0f}% диапазона, закрытие у края"
+                if p["pattern"] == "body" else f"свеча-отказ: тень против направления не меньше {p['wick'] * 100:.0f}% диапазона")
+        out.append(f"Вход: на закрытии свечи {tf}, если это {what}, а объём минимум в {_g(p['vol'])} раза выше среднего за {p.get('vlen', 20)} свечей.")
+        if p.get("sides") == "short":
+            out.append("Только шорты.")
+        flt = p.get("htf_filter", 0)
+        out.append({0: "Фильтра тренда нет.", 1: f"Фильтр: не против тренда {htf}.", 2: f"Фильтр: только по тренду {htf} (EMA{p['htf_fast']}/EMA{p['htf_slow']}).",
+                    3: f"Фильтр: только против тренда {htf} (разворот)."}[flt])
+        out.append(f"Стоп: за экстремумом свечи плюс {_g(p['stop_buf'])} ATR.")
+    elif profile["family"] == "breakout":
         vol = f" Объём сигнальной свечи выше среднего за 20 свечей минимум в {_g(p['vol'])} раза." if p.get("vol") else ""
         out.append(f"Вход: свеча {tf} закрылась выше максимума (лонг) или ниже минимума (шорт) за {p['n']} свечей ({span_text(p['n'], profile['tf'])}).{vol}")
         flt = p.get("htf_filter", 0)

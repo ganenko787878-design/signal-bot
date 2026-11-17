@@ -27,7 +27,8 @@
    "flip": false
   },
   "max_open": 3,
-  "risk_pct": 0.2
+  "risk_pct": 0.2,
+  "default_on": false
  },
  "id_high": {
   "title": "Внутри дня · высокий риск",
@@ -57,7 +58,8 @@
    "flip": false
   },
   "max_open": 3,
-  "risk_pct": 0.45
+  "risk_pct": 0.45,
+  "default_on": false
  },
  "sw_mod": {
   "title": "Среднесрок · умеренный риск",
@@ -86,7 +88,8 @@
    "flip": false
   },
   "max_open": 3,
-  "risk_pct": 0.45
+  "risk_pct": 0.45,
+  "default_on": false
  },
  "sw_high": {
   "title": "Среднесрок · высокий риск",
@@ -115,6 +118,43 @@
    "flip": false
   },
   "max_open": 4,
-  "risk_pct": 0.4
+  "risk_pct": 0.4,
+  "default_on": false
+ },
+ "vc": {
+  "tf": "240",
+  "htf": "D",
+  "family": "volcandle",
+  "p": {
+   "body": 0.6,
+   "close_edge": 0.25,
+   "pattern": "body",
+   "vol": 1.5,
+   "vlen": 20,
+   "htf_filter": 0,
+   "sides": "both",
+   "stop_buf": 0.1,
+   "max_stop": 3.0,
+   "min_stop": 0.3,
+   "htf_fast": 50,
+   "htf_slow": 200,
+   "adx_min": 0
+  },
+  "ex": {
+   "tp1_r": 2.0,
+   "tp1_frac": 0.5,
+   "be": true,
+   "max_bars": 60,
+   "flip": false,
+   "tp2_r": 3.0,
+   "trail_atr": null
+  },
+  "title": "Свеча с объёмом · 4ч",
+  "code": "СВ",
+  "horizon": "swing",
+  "risk": "moderate",
+  "max_open": 10,
+  "risk_pct": 0.5,
+  "default_on": true
  }
 }
